@@ -95,13 +95,13 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
         // QR Code event
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
-            logger.info(`Connection update for ${instanceName}: ${JSON.stringify({ connection, hasQR: !!qr })}');
+            logger.info(`Connection update for ${instanceName}: ${JSON.stringify({ connection, hasQR: !!qr })}`);
 
             if (qr) {
                 try {
                     // Generate QR code as base64
                     const qrBase64 = await QRCode.toDataURL(qr);
-                    logger.info(`QR Code generated for ${ instanceName }`);
+                    logger.info(`QR Code generated for ${instanceName}`);
                     clearTimeout(timeout);
 
                     // Store QR in session
@@ -113,7 +113,7 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
 
                     qrCodeResolve(qrBase64);
                 } catch (err) {
-                    logger.error(`QR generation error: ${ err.message } `);
+                    logger.error(`QR generation error: ${err.message} `);
                     qrCodeReject(err);
                 }
             }
@@ -122,14 +122,14 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
                 const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
 
                 if (shouldReconnect) {
-                    logger.info(`Reconnecting ${ instanceName }...`);
+                    logger.info(`Reconnecting ${instanceName}...`);
                 } else {
-                    logger.info(`Session ${ instanceName } logged out`);
+                    logger.info(`Session ${instanceName} logged out`);
                     sessions.delete(instanceName);
                 }
             } else if (connection === 'open') {
                 isConnected = true;
-                logger.info(`WhatsApp connected for ${ instanceName }`);
+                logger.info(`WhatsApp connected for ${instanceName}`);
 
                 // Update session
                 const session = sessions.get(instanceName);
@@ -164,7 +164,7 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
         });
 
     } catch (error) {
-        logger.error(`Error creating instance: ${ error.message } `);
+        logger.error(`Error creating instance: ${error.message} `);
         res.status(500).json({ error: error.message });
     }
 });
@@ -208,7 +208,7 @@ app.get('/instance/qr/:instanceName', authMiddleware, async (req, res) => {
         });
 
     } catch (error) {
-        logger.error(`Error getting QR: ${ error.message } `);
+        logger.error(`Error getting QR: ${error.message} `);
         res.status(500).json({ error: error.message });
     }
 });
@@ -242,7 +242,7 @@ app.get('/instance/fetchInstances', authMiddleware, async (req, res) => {
         }]);
 
     } catch (error) {
-        logger.error(`Error fetching instances: ${ error.message } `);
+        logger.error(`Error fetching instances: ${error.message} `);
         res.status(500).json({ error: error.message });
     }
 });
@@ -267,7 +267,7 @@ app.delete('/instance/delete/:instanceName', authMiddleware, async (req, res) =>
         res.json({ message: 'Instance deleted' });
 
     } catch (error) {
-        logger.error(`Error deleting instance: ${ error.message } `);
+        logger.error(`Error deleting instance: ${error.message} `);
         res.status(500).json({ error: error.message });
     }
 });
@@ -284,18 +284,18 @@ app.post('/message/sendText/:instanceName', authMiddleware, async (req, res) => 
             return res.status(400).json({ error: 'Instance not connected' });
         }
 
-        const jid = number.includes('@') ? number : `${ number } @s.whatsapp.net`;
+        const jid = number.includes('@') ? number : `${number} @s.whatsapp.net`;
 
         await session.sock.sendMessage(jid, { text });
 
         res.json({ status: 'success', message: 'Message sent' });
 
     } catch (error) {
-        logger.error(`Error sending message: ${ error.message } `);
+        logger.error(`Error sending message: ${error.message} `);
         res.status(500).json({ error: error.message });
     }
 });
 
 app.listen(PORT, () => {
-    logger.info(`Baileys WhatsApp Service running on port ${ PORT } `);
+    logger.info(`Baileys WhatsApp Service running on port ${PORT} `);
 });
