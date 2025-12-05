@@ -47,61 +47,68 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
         const { state, saveCreds } = await useMultiFileAuthState(`./auth_info_${instanceName}`);
 
         let isConnected = false;
+        let qrCodeResolve;
+        let qrCodeReject;
 
         // Create Promise to wait for QR
-        const qrCodePromise = new Promise((resolve) => {
-            const timeout = setTimeout(() => {
-                logger.warn(`QR timeout for ${instanceName}`);
-                resolve(null);
-            }, 15000); // 15 second timeout
+        const qrCodePromise = new Promise((resolve, reject) => {
+            qrCodeResolve = resolve;
+            qrCodeReject = reject;
+        });
 
-            const sock = makeWASocket({
-                auth: state,
-                printQRInTerminal: false,
-                logger: pino({ level: 'silent' })
-            });
+        const sock = makeWASocket({
+            auth: state,
+            printQRInTerminal: false,
+            logger: pino({ level: 'silent' })
+        });
 
-            // QR Code event
-            sock.ev.on('connection.update', async (update) => {
-                const { connection, lastDisconnect, qr } = update;
+        // Set timeout
+        const timeout = setTimeout(() => {
+            logger.warn(`QR timeout for ${instanceName}`);
+            qrCodeReject(new Error('QR generation timeout'));
+        }, 15000); // 15 second timeout
 
-                if (qr) {
+        // QR Code event
+        sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+
+            if (qr) {
+                try {
                     // Generate QR code as base64
                     const qrBase64 = await QRCode.toDataURL(qr);
                     logger.info(`QR Code generated for ${instanceName}`);
                     clearTimeout(timeout);
-                    resolve({ sock, qrCode: qrBase64 });
+                    qrCodeResolve(qrBase64);
+                } catch (err) {
+                    logger.error(`QR generation error: ${err.message}`);
+                    qrCodeReject(err);
                 }
+            }
 
-                if (connection === 'close') {
-                    const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+            if (connection === 'close') {
+                const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
 
-                    if (shouldReconnect) {
-                        logger.info(`Reconnecting ${instanceName}...`);
-                    } else {
-                        logger.info(`Session ${instanceName} logged out`);
-                        sessions.delete(instanceName);
-                    }
-                } else if (connection === 'open') {
-                    isConnected = true;
-                    logger.info(`WhatsApp connected for ${instanceName}`);
+                if (shouldReconnect) {
+                    logger.info(`Reconnecting ${instanceName}...`);
+                } else {
+                    logger.info(`Session ${instanceName} logged out`);
+                    sessions.delete(instanceName);
                 }
-            });
-
-            sock.ev.on('creds.update', saveCreds);
+            } else if (connection === 'open') {
+                isConnected = true;
+                logger.info(`WhatsApp connected for ${instanceName}`);
+            }
         });
 
-        // Wait for QR code
-        const result = await qrCodePromise;
+        sock.ev.on('creds.update', saveCreds);
 
-        if (!result || !result.qrCode) {
-            return res.status(500).json({ error: 'Failed to generate QR code' });
-        }
+        // Wait for QR code
+        const qrCode = await qrCodePromise;
 
         // Store session
         sessions.set(instanceName, {
-            sock: result.sock,
-            qrCode: result.qrCode,
+            sock,
+            qrCode,
             isConnected,
             createdAt: new Date()
         });
@@ -112,7 +119,7 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
                 status: isConnected ? 'open' : 'connecting'
             },
             qrcode: {
-                base64: result.qrCode
+                base64: qrCode
             }
         });
 
