@@ -83,7 +83,10 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
         const sock = makeWASocket({
             auth: state,
             printQRInTerminal: true,
-            logger: pino({ level: 'info' })
+            logger: pino({ level: 'info' }),
+            connectTimeoutMs: 60000,
+            defaultQueryTimeoutMs: 60000,
+            retryRequestDelayMs: 5000
         });
 
         // Timeout for QR generation (60 seconds)
