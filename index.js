@@ -67,6 +67,28 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
             }
         }
 
+        // Check if instance already exists and clean up
+        if (sessions.has(instanceName)) {
+            const existingSession = sessions.get(instanceName);
+            if (existingSession.socket) {
+                logger.info(`Instance ${instanceName} already exists, closing old connection`);
+                try {
+                    await existingSession.socket.logout();
+                } catch (err) {
+                    logger.warn(`Error logging out old session: ${err.message}`);
+                }
+            }
+            sessions.delete(instanceName);
+        }
+
+        // Delete old auth folder to force fresh QR generation
+        const fs = require('fs');
+        const authPath = `./auth_info_${instanceName}`;
+        if (fs.existsSync(authPath)) {
+            logger.info(`Deleting old auth folder: ${authPath}`);
+            fs.rmSync(authPath, { recursive: true, force: true });
+        }
+
         // Create new session
         const { state, saveCreds } = await useMultiFileAuthState(`./auth_info_${instanceName}`);
 
