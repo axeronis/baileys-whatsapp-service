@@ -1,6 +1,5 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, usePairingCode } = require('@whiskeysockets/baileys');
 const express = require('express');
-const QRCode = require('qrcode');
 const pino = require('pino');
 
 const app = express();
@@ -9,13 +8,14 @@ app.use(express.json());
 const PORT = process.env.PORT || 8080;
 const API_KEY = process.env.API_KEY || 'your-secret-key';
 
-// Store sessions in memory (in production, use Redis/database)
+// Store sessions in memory
 const sessions = new Map();
+const pairingCodes = new Map();
 
 // Logger
 const logger = pino({ level: 'info' });
 
-// Middleware для проверки API ключа
+// Auth middleware
 function authMiddleware(req, res, next) {
     const apiKey = req.headers['apikey'] || req.headers['authorization']?.replace('Bearer ', '');
     if (apiKey !== API_KEY) {
@@ -29,13 +29,17 @@ app.get('/health', (req, res) => {
     res.json({ status: 'ok', sessions: sessions.size });
 });
 
-// Generate QR Code
+// Request pairing code
 app.post('/instance/create', authMiddleware, async (req, res) => {
     try {
-        const { instanceName } = req.body;
+        const { instanceName, phoneNumber } = req.body;
 
         if (!instanceName) {
             return res.status(400).json({ error: 'instanceName is required' });
+        }
+
+        if (!phoneNumber) {
+            return res.status(400).json({ error: 'phoneNumber is required' });
         }
 
         // Check if session already exists
@@ -47,14 +51,7 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
         const { state, saveCreds } = await useMultiFileAuthState(`./auth_info_${instanceName}`);
 
         let isConnected = false;
-        let qrCodeResolve;
-        let qrCodeReject;
-
-        // Create Promise to wait for QR
-        const qrCodePromise = new Promise((resolve, reject) => {
-            qrCodeResolve = resolve;
-            qrCodeReject = reject;
-        });
+        let pairingCode = null;
 
         const sock = makeWASocket({
             auth: state,
@@ -62,28 +59,20 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
             logger: pino({ level: 'silent' })
         });
 
-        // Set timeout
-        const timeout = setTimeout(() => {
-            logger.warn(`QR timeout for ${instanceName}`);
-            qrCodeReject(new Error('QR generation timeout'));
-        }, 15000); // 15 second timeout
+        // Request pairing code
+        if (!sock.authState.creds.registered) {
+            // Clean phone number (remove spaces, dashes, etc)
+            const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
 
-        // QR Code event
-        sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect, qr } = update;
+            // Request pairing code
+            pairingCode = await sock.requestPairingCode(cleanNumber);
 
-            if (qr) {
-                try {
-                    // Generate QR code as base64
-                    const qrBase64 = await QRCode.toDataURL(qr);
-                    logger.info(`QR Code generated for ${instanceName}`);
-                    clearTimeout(timeout);
-                    qrCodeResolve(qrBase64);
-                } catch (err) {
-                    logger.error(`QR generation error: ${err.message}`);
-                    qrCodeReject(err);
-                }
-            }
+            logger.info(`Pairing code generated for ${instanceName}: ${pairingCode}`);
+        }
+
+        // Connection events
+        sock.ev.on('connection.update', (update) => {
+            const { connection, lastDisconnect } = update;
 
             if (connection === 'close') {
                 const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
@@ -93,6 +82,7 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
                 } else {
                     logger.info(`Session ${instanceName} logged out`);
                     sessions.delete(instanceName);
+                    pairingCodes.delete(instanceName);
                 }
             } else if (connection === 'open') {
                 isConnected = true;
@@ -102,25 +92,25 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
 
         sock.ev.on('creds.update', saveCreds);
 
-        // Wait for QR code
-        const qrCode = await qrCodePromise;
-
         // Store session
         sessions.set(instanceName, {
             sock,
-            qrCode,
             isConnected,
+            phoneNumber: cleanNumber,
             createdAt: new Date()
         });
+
+        if (pairingCode) {
+            pairingCodes.set(instanceName, pairingCode);
+        }
 
         res.json({
             instance: {
                 instanceName,
-                status: isConnected ? 'open' : 'connecting'
+                status: isConnected ? 'open' : 'connecting',
+                phoneNumber: cleanNumber
             },
-            qrcode: {
-                base64: qrCode
-            }
+            pairingCode: pairingCode || null
         });
 
     } catch (error) {
@@ -139,6 +129,7 @@ app.get('/instance/fetchInstances', authMiddleware, async (req, res) => {
             const allInstances = Array.from(sessions.entries()).map(([name, data]) => ({
                 name,
                 connectionStatus: data.isConnected ? 'open' : 'close',
+                phoneNumber: data.phoneNumber,
                 createdAt: data.createdAt
             }));
             return res.json(allInstances);
@@ -153,7 +144,8 @@ app.get('/instance/fetchInstances', authMiddleware, async (req, res) => {
         res.json([{
             name: instanceName,
             connectionStatus: session.isConnected ? 'open' : 'close',
-            qrcode: session.qrCode,
+            phoneNumber: session.phoneNumber,
+            pairingCode: pairingCodes.get(instanceName),
             createdAt: session.createdAt
         }]);
 
@@ -177,6 +169,7 @@ app.delete('/instance/delete/:instanceName', authMiddleware, async (req, res) =>
         // Close socket
         await session.sock.logout();
         sessions.delete(instanceName);
+        pairingCodes.delete(instanceName);
 
         res.json({ message: 'Instance deleted' });
 
