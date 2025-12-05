@@ -1,6 +1,5 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, usePairingCode } = require('@whiskeysockets/baileys');
 const express = require('express');
-const QRCode = require('qrcode');
 const pino = require('pino');
 
 const app = express();
@@ -11,6 +10,7 @@ const API_KEY = process.env.API_KEY || 'your-secret-key';
 
 // Store sessions in memory
 const sessions = new Map();
+const pairingCodes = new Map();
 
 // Logger
 const logger = pino({ level: 'info' });
@@ -29,56 +29,29 @@ app.get('/health', (req, res) => {
     res.json({ status: 'ok', sessions: sessions.size });
 });
 
-// Create instance and generate QR
+// Request pairing code
 app.post('/instance/create', authMiddleware, async (req, res) => {
     try {
-        const { instanceName } = req.body;
+        const { instanceName, phoneNumber } = req.body;
 
         if (!instanceName) {
             return res.status(400).json({ error: 'instanceName is required' });
         }
 
-        // Check if session already exists
-        if (sessions.has(instanceName)) {
-            const session = sessions.get(instanceName);
-
-            // If already connected, return status
-            if (session.isConnected) {
-                return res.json({
-                    instance: {
-                        instanceName,
-                        status: 'open'
-                    },
-                    message: 'Instance already connected'
-                });
-            }
-
-            // If has QR, return it
-            if (session.qrCode) {
-                return res.json({
-                    instance: {
-                        instanceName,
-                        status: 'connecting'
-                    },
-                    qrcode: {
-                        base64: session.qrCode
-                    }
-                });
-            }
+        if (!phoneNumber) {
+            return res.status(400).json({ error: 'phoneNumber is required' });
         }
 
-        // Create new session
+        // Check if session already exists
+        if (sessions.has(instanceName)) {
+            return res.status(403).json({ error: 'Instance already exists' });
+        }
+
+        // Create session
         const { state, saveCreds } = await useMultiFileAuthState(`./auth_info_${instanceName}`);
 
         let isConnected = false;
-        let qrCodeResolve;
-        let qrCodeReject;
-
-        // Promise to wait for QR
-        const qrCodePromise = new Promise((resolve, reject) => {
-            qrCodeResolve = resolve;
-            qrCodeReject = reject;
-        });
+        let pairingCode = null;
 
         const sock = makeWASocket({
             auth: state,
@@ -86,36 +59,20 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
             logger: pino({ level: 'silent' })
         });
 
-        // Timeout for QR generation
-        const timeout = setTimeout(() => {
-            logger.warn(`QR timeout for ${instanceName}`);
-            qrCodeReject(new Error('QR generation timeout'));
-        }, 15000);
+        // Request pairing code
+        if (!sock.authState.creds.registered) {
+            // Clean phone number (remove spaces, dashes, etc)
+            const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
 
-        // QR Code event
-        sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect, qr } = update;
+            // Request pairing code
+            pairingCode = await sock.requestPairingCode(cleanNumber);
 
-            if (qr) {
-                try {
-                    // Generate QR code as base64
-                    const qrBase64 = await QRCode.toDataURL(qr);
-                    logger.info(`QR Code generated for ${instanceName}`);
-                    clearTimeout(timeout);
+            logger.info(`Pairing code generated for ${instanceName}: ${pairingCode}`);
+        }
 
-                    // Store QR in session
-                    const session = sessions.get(instanceName) || {};
-                    session.qrCode = qrBase64;
-                    session.qrRaw = qr;
-                    session.qrGeneratedAt = Date.now();
-                    sessions.set(instanceName, session);
-
-                    qrCodeResolve(qrBase64);
-                } catch (err) {
-                    logger.error(`QR generation error: ${err.message}`);
-                    qrCodeReject(err);
-                }
-            }
+        // Connection events
+        sock.ev.on('connection.update', (update) => {
+            const { connection, lastDisconnect } = update;
 
             if (connection === 'close') {
                 const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
@@ -125,89 +82,39 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
                 } else {
                     logger.info(`Session ${instanceName} logged out`);
                     sessions.delete(instanceName);
+                    pairingCodes.delete(instanceName);
                 }
             } else if (connection === 'open') {
                 isConnected = true;
                 logger.info(`WhatsApp connected for ${instanceName}`);
-
-                // Update session
-                const session = sessions.get(instanceName);
-                if (session) {
-                    session.isConnected = true;
-                    session.qrCode = null; // Clear QR after connection
-                }
             }
         });
 
         sock.ev.on('creds.update', saveCreds);
 
-        // Wait for QR code
-        const qrCode = await qrCodePromise;
-
         // Store session
         sessions.set(instanceName, {
             sock,
-            qrCode,
             isConnected,
+            phoneNumber: cleanNumber,
             createdAt: new Date()
         });
+
+        if (pairingCode) {
+            pairingCodes.set(instanceName, pairingCode);
+        }
 
         res.json({
             instance: {
                 instanceName,
-                status: isConnected ? 'open' : 'connecting'
+                status: isConnected ? 'open' : 'connecting',
+                phoneNumber: cleanNumber
             },
-            qrcode: {
-                base64: qrCode
-            }
+            pairingCode: pairingCode || null
         });
 
     } catch (error) {
         logger.error(`Error creating instance: ${error.message}`);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Get fresh QR code (for auto-refresh)
-app.get('/instance/qr/:instanceName', authMiddleware, async (req, res) => {
-    try {
-        const { instanceName } = req.params;
-
-        const session = sessions.get(instanceName);
-
-        if (!session) {
-            return res.status(404).json({ error: 'Instance not found' });
-        }
-
-        if (session.isConnected) {
-            return res.json({
-                status: 'connected',
-                message: 'Instance already connected'
-            });
-        }
-
-        // Return current QR if exists and not expired (60 seconds)
-        if (session.qrCode && session.qrGeneratedAt) {
-            const age = Date.now() - session.qrGeneratedAt;
-            if (age < 60000) { // Less than 60 seconds
-                return res.json({
-                    qrcode: {
-                        base64: session.qrCode
-                    },
-                    expiresIn: Math.floor((60000 - age) / 1000)
-                });
-            }
-        }
-
-        // QR expired or doesn't exist, need to regenerate
-        // This happens automatically when WhatsApp sends new QR
-        return res.json({
-            status: 'waiting',
-            message: 'Waiting for new QR code'
-        });
-
-    } catch (error) {
-        logger.error(`Error getting QR: ${error.message}`);
         res.status(500).json({ error: error.message });
     }
 });
@@ -222,6 +129,7 @@ app.get('/instance/fetchInstances', authMiddleware, async (req, res) => {
             const allInstances = Array.from(sessions.entries()).map(([name, data]) => ({
                 name,
                 connectionStatus: data.isConnected ? 'open' : 'close',
+                phoneNumber: data.phoneNumber,
                 createdAt: data.createdAt
             }));
             return res.json(allInstances);
@@ -236,7 +144,8 @@ app.get('/instance/fetchInstances', authMiddleware, async (req, res) => {
         res.json([{
             name: instanceName,
             connectionStatus: session.isConnected ? 'open' : 'close',
-            qrcode: session.qrCode,
+            phoneNumber: session.phoneNumber,
+            pairingCode: pairingCodes.get(instanceName),
             createdAt: session.createdAt
         }]);
 
@@ -258,10 +167,9 @@ app.delete('/instance/delete/:instanceName', authMiddleware, async (req, res) =>
         }
 
         // Close socket
-        if (session.sock) {
-            await session.sock.logout();
-        }
+        await session.sock.logout();
         sessions.delete(instanceName);
+        pairingCodes.delete(instanceName);
 
         res.json({ message: 'Instance deleted' });
 
