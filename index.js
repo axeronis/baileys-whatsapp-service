@@ -225,23 +225,34 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
                             qrCodeReject = null;
                         }
 
-                        // 515 specifically needs a restart
-                        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+                    } catch (err) {
+                        logger.error(`QR generation error: ${err.message}`);
+                    }
+                }
 
-                        if (shouldReconnect) {
-                            logger.info(`Reconnecting ${instanceName} (auto-restart logic)...`);
-                            // Delay slightly to prevent tight loops
-                            setTimeout(() => startSock(), 2000);
-                        } else {
-                            logger.info(`Session ${instanceName} logged out definitively`);
-                            sessions.delete(instanceName);
-                            // If we were waiting for QR, reject it
-                            if (qrCodeReject) {
-                                clearTimeout(apiTimeout);
-                                qrCodeReject(new Error('Session logged out during startup'));
-                            }
+                // Handle Connection Close / Reconnect
+                if (connection === 'close') {
+                    const statusCode = lastDisconnect?.error?.output?.statusCode;
+                    const error = lastDisconnect?.error;
+                    logger.error(`Connection closed for ${instanceName}. Status: ${statusCode}, Error: ${error?.message}`);
+
+                    // 515 specifically needs a restart
+                    const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+                    if (shouldReconnect) {
+                        logger.info(`Reconnecting ${instanceName} (auto-restart logic)...`);
+                        // Delay slightly to prevent tight loops
+                        setTimeout(() => startSock(), 2000);
+                    } else {
+                        logger.info(`Session ${instanceName} logged out definitively`);
+                        sessions.delete(instanceName);
+                        // If we were waiting for QR, reject it
+                        if (qrCodeReject) {
+                            clearTimeout(apiTimeout);
+                            qrCodeReject(new Error('Session logged out during startup'));
                         }
                     }
+                }
 
                 // Handle Connected
                 else if (connection === 'open') {
