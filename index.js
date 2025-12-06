@@ -144,7 +144,12 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
             }
 
             if (connection === 'close') {
-                const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                const error = lastDisconnect?.error;
+
+                logger.error(`Connection closed for ${instanceName}. Status: ${statusCode}, Error: ${error?.message}`);
+
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
                 if (shouldReconnect) {
                     logger.info(`Reconnecting ${instanceName}...`);
