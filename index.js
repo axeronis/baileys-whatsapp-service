@@ -68,21 +68,22 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
             }
         }
 
-        // Check if instance already exists and clean up
+        // Clean up any existing session properly
         if (sessions.has(instanceName)) {
             const existingSession = sessions.get(instanceName);
-            if (existingSession.socket) {
+            if (existingSession.sock) {
                 logger.info(`Instance ${instanceName} already exists, closing old connection`);
                 try {
-                    await existingSession.socket.logout();
+                    // Try to logout/end
+                    existingSession.sock.end(new Error('Starting new session'));
                 } catch (err) {
-                    logger.warn(`Error logging out old session: ${err.message}`);
+                    logger.warn(`Error closing old session: ${err.message}`);
                 }
             }
             sessions.delete(instanceName);
         }
 
-        // Delete old auth folder to force fresh QR generation
+        // Delete old auth folder to force fresh QR generation if starting fresh
         const fs = require('fs');
         const authPath = `./auth_info_${instanceName}`;
         if (fs.existsSync(authPath)) {
@@ -90,125 +91,161 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
             fs.rmSync(authPath, { recursive: true, force: true });
         }
 
-        // Create new session
-        const { state, saveCreds } = await useMultiFileAuthState(`./auth_info_${instanceName}`);
+        // Create new auth state
+        const { state, saveCreds } = await useMultiFileAuthState(authPath);
 
-        let isConnected = false;
         let qrCodeResolve;
         let qrCodeReject;
 
-        // Promise to wait for QR
+        // Promise that resolves when first QR is generated (for API response)
         const qrCodePromise = new Promise((resolve, reject) => {
             qrCodeResolve = resolve;
             qrCodeReject = reject;
         });
 
-        const sock = makeWASocket({
-            auth: state,
-            printQRInTerminal: false,
-            logger: pino({ level: 'info' }),
-            // Use standard Windows Desktop UA to avoid 515 Stream Error
-            browser: ['Windows', 'Chrome', '126.0.6478.126'],
-            markOnlineOnConnect: true, // Fix 515 error by signaling presence
-            generateHighQualityLinkPreview: true,
-            connectTimeoutMs: 60000,
-            defaultQueryTimeoutMs: 60000,
-            retryRequestDelayMs: 5000, // Increase retry delay
-            keepAliveIntervalMs: 10000, // Keep connection alive
-            syncFullHistory: false, // Speed up connection
-            msgRetryCounterCache: msgRetryCounterCache, // Resolve 515 Stream Error
-            getMessage: async (key) => {
-                return {
-                    conversation: 'hello'
-                }
+        // Timeout to answer API call if QR takes too long
+        const apiTimeout = setTimeout(() => {
+            if (qrCodeReject) {
+                logger.error(`QR timeout for ${instanceName} after 60s`);
+                qrCodeReject(new Error('QR generation timeout'));
+                qrCodeResolve = null;
+                qrCodeReject = null;
             }
-        });
-
-        // Timeout for QR generation (60 seconds)
-        const timeout = setTimeout(() => {
-            logger.error(`QR timeout for ${instanceName} after 60s`);
-            qrCodeReject(new Error('QR generation timeout'));
         }, 60000);
 
-        // QR Code event
-        sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect, qr } = update;
-            logger.info(`Connection update for ${instanceName}: ${JSON.stringify({ connection, hasQR: !!qr })}`);
-
-            if (qr) {
-                try {
-                    // Generate QR code as base64
-                    const qrBase64 = await QRCode.toDataURL(qr);
-                    logger.info(`QR Code generated for ${instanceName}`);
-                    clearTimeout(timeout);
-
-                    // Store QR in session
-                    const session = sessions.get(instanceName) || {};
-                    session.qrCode = qrBase64;
-                    session.qrRaw = qr;
-                    session.qrGeneratedAt = Date.now();
-                    sessions.set(instanceName, session);
-
-                    qrCodeResolve(qrBase64);
-                } catch (err) {
-                    logger.error(`QR generation error: ${err.message} `);
-                    qrCodeReject(err);
+        // Recursive function to start/restart socket
+        const startSock = async () => {
+            const sock = makeWASocket({
+                auth: state,
+                printQRInTerminal: false,
+                logger: pino({ level: 'info' }),
+                browser: ['Windows', 'Chrome', '126.0.6478.126'],
+                markOnlineOnConnect: true,
+                generateHighQualityLinkPreview: true,
+                connectTimeoutMs: 60000,
+                defaultQueryTimeoutMs: 60000,
+                retryRequestDelayMs: 5000,
+                keepAliveIntervalMs: 10000,
+                syncFullHistory: false, // Critical for stability with 515
+                msgRetryCounterCache,
+                getMessage: async (key) => {
+                    return { conversation: 'hello' };
                 }
-            }
+            });
 
-            if (connection === 'close') {
-                const statusCode = lastDisconnect?.error?.output?.statusCode;
-                const error = lastDisconnect?.error;
+            // Store socket in session immediately so we can close it later if needed
+            // But be careful not to overwrite 'qrCode' property if it exists from previous run?
+            // Actually, we should merge.
+            let currentSession = sessions.get(instanceName) || { createdAt: new Date() };
+            currentSession.sock = sock;
+            sessions.set(instanceName, currentSession);
 
-                logger.error(`Connection closed for ${instanceName}. Status: ${statusCode}, Error: ${error?.message}`);
+            sock.ev.on('creds.update', saveCreds);
 
-                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+            sock.ev.on('connection.update', async (update) => {
+                const { connection, lastDisconnect, qr } = update;
 
-                if (shouldReconnect) {
-                    logger.info(`Reconnecting ${instanceName}...`);
-                } else {
-                    logger.info(`Session ${instanceName} logged out`);
-                    sessions.delete(instanceName);
+                // Handle QR
+                if (qr) {
+                    try {
+                        const qrBase64 = await QRCode.toDataURL(qr);
+                        logger.info(`QR Code generated for ${instanceName}`);
+
+                        // Update session
+                        const s = sessions.get(instanceName) || {};
+                        s.qrCode = qrBase64;
+                        s.qrRaw = qr;
+                        s.qrGeneratedAt = Date.now();
+                        s.isConnected = false;
+                        sessions.set(instanceName, s);
+
+                        // Resolve initial API promise if waiting
+                        if (qrCodeResolve) {
+                            clearTimeout(apiTimeout);
+                            qrCodeResolve(qrBase64);
+                            qrCodeResolve = null;
+                            qrCodeReject = null;
+                        }
+                    } catch (err) {
+                        logger.error(`QR generation error: ${err.message}`);
+                    }
                 }
-            } else if (connection === 'open') {
-                isConnected = true;
-                logger.info(`WhatsApp connected for ${instanceName}`);
 
-                // Update session
-                const session = sessions.get(instanceName);
-                if (session) {
-                    session.isConnected = true;
-                    session.qrCode = null; // Clear QR after connection
+                // Handle Connection Close / Reconnect
+                if (connection === 'close') {
+                    const statusCode = lastDisconnect?.error?.output?.statusCode;
+                    const error = lastDisconnect?.error;
+                    logger.error(`Connection closed for ${instanceName}. Status: ${statusCode}, Error: ${error?.message}`);
+
+                    // 515 specifically needs a restart
+                    const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+                    if (shouldReconnect) {
+                        logger.info(`Reconnecting ${instanceName} (auto-restart logic)...`);
+                        // Delay slightly to prevent tight loops
+                        setTimeout(() => startSock(), 2000);
+                    } else {
+                        logger.info(`Session ${instanceName} logged out definitively`);
+                        sessions.delete(instanceName);
+                        // If we were waiting for QR, reject it
+                        if (qrCodeReject) {
+                            clearTimeout(apiTimeout);
+                            qrCodeReject(new Error('Session logged out during startup'));
+                        }
+                    }
                 }
-            }
-        });
 
-        sock.ev.on('creds.update', saveCreds);
+                // Handle Connected
+                else if (connection === 'open') {
+                    logger.info(`WhatsApp connected for ${instanceName}`);
+                    const s = sessions.get(instanceName);
+                    if (s) {
+                        s.isConnected = true;
+                        s.qrCode = null;
+                    }
 
-        // Wait for QR code
-        const qrCode = await qrCodePromise;
+                    // If we connected WITHOUT a QR (e.g. session restored), resolve promise too
+                    if (qrCodeResolve) {
+                        clearTimeout(apiTimeout);
+                        // We resolve with null QR to indicate immediate connection? 
+                        // Or just resolve with "connected"
+                        // The API expects { instance, qrcode }. Content doesn't matter much if status is open.
+                        qrCodeResolve(null); // Signal connected
+                        qrCodeResolve = null;
+                        qrCodeReject = null;
+                    }
+                }
+            });
+        };
 
-        // Store session
-        sessions.set(instanceName, {
-            sock,
-            qrCode,
-            isConnected,
-            createdAt: new Date()
-        });
+        // Start the first socket
+        await startSock();
 
-        res.json({
-            instance: {
-                instanceName,
-                status: isConnected ? 'open' : 'connecting'
-            },
-            qrcode: {
-                base64: qrCode
-            }
-        });
+        // Wait for result (QR or Connection)
+        try {
+            const qrResult = await qrCodePromise;
+
+            // Check session status
+            const finalSession = sessions.get(instanceName);
+            const isConnected = finalSession?.isConnected || false;
+
+            res.json({
+                instance: {
+                    instanceName,
+                    status: isConnected ? 'open' : 'connecting'
+                },
+                qrcode: qrResult ? { base64: qrResult } : undefined
+            });
+
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
 
     } catch (error) {
         logger.error(`Error creating instance: ${error.message} `);
-        res.status(500).json({ error: error.message });
+        if (!res.headersSent) {
+            res.status(500).json({ error: error.message });
+        }
     }
 });
 
