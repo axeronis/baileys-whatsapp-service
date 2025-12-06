@@ -1,4 +1,4 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const express = require('express');
 const QRCode = require('qrcode');
 const pino = require('pino');
@@ -115,18 +115,21 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
 
         // Recursive function to start/restart socket
         const startSock = async () => {
+            const { version, isLatest } = await fetchLatestBaileysVersion();
+            logger.info(`Using WA v${version.join('.')}, isLatest: ${isLatest}`);
+
             const sock = makeWASocket({
+                version,
                 auth: state,
                 printQRInTerminal: false,
                 logger: pino({ level: 'info' }),
-                browser: ['Windows', 'Chrome', '126.0.6478.126'],
+                browser: ['Ubuntu', 'Chrome', '20.0.04'], // Standard Linux/Chrome signature
                 markOnlineOnConnect: true,
-                generateHighQualityLinkPreview: true,
+                generateHighQualityLinkPreview: false, // Disable to reduce resource load
                 connectTimeoutMs: 60000,
                 defaultQueryTimeoutMs: 60000,
-                retryRequestDelayMs: 5000,
-                keepAliveIntervalMs: 10000,
-                syncFullHistory: false, // Critical for stability with 515
+                retryRequestDelayMs: 2000, // Slightly faster retry
+                syncFullHistory: false,
                 msgRetryCounterCache,
                 getMessage: async (key) => {
                     return { conversation: 'hello' };
