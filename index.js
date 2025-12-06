@@ -185,7 +185,7 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
                         // Send to main backend
                         // Use internal docker network URL for backend
                         const backendUrl = process.env.BACKEND_URL || 'http://backend:8000';
-                        const webhookUrl = `${backendUrl}/api/webhook/evolution/${tenantId}`;
+                        const webhookUrl = `${backendUrl}/api/v1/webhook/evolution/${tenantId}`;
 
                         logger.info(`Forwarding message from ${msg.key.remoteJid} to ${webhookUrl}`);
 
