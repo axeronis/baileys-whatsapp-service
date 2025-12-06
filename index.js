@@ -2,6 +2,7 @@ const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLat
 const express = require('express');
 const QRCode = require('qrcode');
 const pino = require('pino');
+const axios = require('axios'); // Add axios for webhooks
 
 const app = express();
 app.use(express.json());
@@ -145,6 +146,60 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
 
             sock.ev.on('creds.update', saveCreds);
 
+            sock.ev.on('messages.upsert', async (update) => {
+                // Determine connection state from sessions or sock
+                // Actually messages.upsert is separate from connection.update
+                // We need to handle this event separately!
+            });
+
+            // We move the messages.upsert logic inside the startSock function scope, 
+            // but we need to register it on sock.ev
+            // The previous placement of connection.update was correct for connection events.
+            // Let's add messages.upsert handler here.
+
+            sock.ev.on('messages.upsert', async ({ messages, type }) => {
+                if (type !== 'notify') return; // Only process new messages
+
+                for (const msg of messages) {
+                    try {
+                        if (!msg.message) continue;
+                        if (msg.key.fromMe) continue; // Skip own messages
+
+                        // Determine text content
+                        const msgContent = msg.message.conversation || msg.message.extendedTextMessage?.text;
+                        if (!msgContent) continue;
+
+                        // Construct payload matching Evolution API format
+                        const webhookPayload = {
+                            type: "messages.upsert",
+                            data: {
+                                key: msg.key,
+                                message: msg.message,
+                                messageTimestamp: msg.messageTimestamp || Date.now() / 1000
+                            }
+                        };
+
+                        // Extract tenant_id from instanceName (format: tenant_{uuid})
+                        const tenantId = instanceName.replace('tenant_', '');
+
+                        // Send to main backend
+                        // Use internal docker network URL for backend
+                        const backendUrl = process.env.BACKEND_URL || 'http://backend:8000';
+                        const webhookUrl = `${backendUrl}/api/webhook/evolution/${tenantId}`;
+
+                        logger.info(`Forwarding message from ${msg.key.remoteJid} to ${webhookUrl}`);
+
+                        // Fire and forget - don't await response to not block Baileys
+                        axios.post(webhookUrl, webhookPayload).catch(err => {
+                            logger.error(`Failed to forward webhook to backend: ${err.message}`);
+                        });
+
+                    } catch (err) {
+                        logger.error(`Error processing incoming message: ${err.message}`);
+                    }
+                }
+            });
+
             sock.ev.on('connection.update', async (update) => {
                 const { connection, lastDisconnect, qr } = update;
 
@@ -169,34 +224,24 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
                             qrCodeResolve = null;
                             qrCodeReject = null;
                         }
-                    } catch (err) {
-                        logger.error(`QR generation error: ${err.message}`);
-                    }
-                }
 
-                // Handle Connection Close / Reconnect
-                if (connection === 'close') {
-                    const statusCode = lastDisconnect?.error?.output?.statusCode;
-                    const error = lastDisconnect?.error;
-                    logger.error(`Connection closed for ${instanceName}. Status: ${statusCode}, Error: ${error?.message}`);
+                        // 515 specifically needs a restart
+                        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-                    // 515 specifically needs a restart
-                    const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-
-                    if (shouldReconnect) {
-                        logger.info(`Reconnecting ${instanceName} (auto-restart logic)...`);
-                        // Delay slightly to prevent tight loops
-                        setTimeout(() => startSock(), 2000);
-                    } else {
-                        logger.info(`Session ${instanceName} logged out definitively`);
-                        sessions.delete(instanceName);
-                        // If we were waiting for QR, reject it
-                        if (qrCodeReject) {
-                            clearTimeout(apiTimeout);
-                            qrCodeReject(new Error('Session logged out during startup'));
+                        if (shouldReconnect) {
+                            logger.info(`Reconnecting ${instanceName} (auto-restart logic)...`);
+                            // Delay slightly to prevent tight loops
+                            setTimeout(() => startSock(), 2000);
+                        } else {
+                            logger.info(`Session ${instanceName} logged out definitively`);
+                            sessions.delete(instanceName);
+                            // If we were waiting for QR, reject it
+                            if (qrCodeReject) {
+                                clearTimeout(apiTimeout);
+                                qrCodeReject(new Error('Session logged out during startup'));
+                            }
                         }
                     }
-                }
 
                 // Handle Connected
                 else if (connection === 'open') {
@@ -391,7 +436,15 @@ app.delete('/instance/delete/:instanceName', authMiddleware, async (req, res) =>
 app.post('/message/sendText/:instanceName', authMiddleware, async (req, res) => {
     try {
         const { instanceName } = req.params;
-        const { number, text } = req.body;
+        const body = req.body;
+
+        // Handle both simple { number, text } and nested { textMessage: { text } } (Evolution API style)
+        let number = body.number;
+        let text = body.text;
+
+        if (!text && body.textMessage && body.textMessage.text) {
+            text = body.textMessage.text;
+        }
 
         const session = sessions.get(instanceName);
 
