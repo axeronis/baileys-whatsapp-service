@@ -106,7 +106,8 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
             auth: state,
             printQRInTerminal: false,
             logger: pino({ level: 'info' }),
-            browser: ['Ubuntu', 'Chrome', '20.0.04'],
+            // Use standard Windows Desktop UA to avoid 515 Stream Error
+            browser: ['Windows', 'Chrome', '126.0.6478.126'],
             markOnlineOnConnect: false,
             generateHighQualityLinkPreview: true,
             connectTimeoutMs: 60000,
@@ -303,8 +304,13 @@ app.delete('/instance/delete/:instanceName', authMiddleware, async (req, res) =>
                         logger.warn(`Logout failed (ignoring): ${err.message}`);
                     });
 
-                    if (session.sock.ws) {
-                        session.sock.ws.terminate();
+                    // Safely terminate socket
+                    if (session.sock.ws && typeof session.sock.ws.terminate === 'function') {
+                        try {
+                            session.sock.ws.terminate();
+                        } catch (err) {
+                            logger.warn(`Socket terminate failed: ${err.message}`);
+                        }
                     }
                 }
             } catch (err) {
