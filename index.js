@@ -11,6 +11,7 @@ const API_KEY = process.env.API_KEY || 'your-secret-key';
 
 // Store sessions in memory
 const sessions = new Map();
+const msgRetryCounterCache = new Map();
 
 // Logger
 const logger = pino({ level: 'info' });
@@ -114,7 +115,13 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
             defaultQueryTimeoutMs: 60000,
             retryRequestDelayMs: 5000, // Increase retry delay
             keepAliveIntervalMs: 10000, // Keep connection alive
-            syncFullHistory: false // Speed up connection
+            syncFullHistory: false, // Speed up connection
+            msgRetryCounterCache: msgRetryCounterCache, // Resolve 515 Stream Error
+            getMessage: async (key) => {
+                return {
+                    conversation: 'hello'
+                }
+            }
         });
 
         // Timeout for QR generation (60 seconds)
