@@ -111,7 +111,9 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
             generateHighQualityLinkPreview: true,
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
-            retryRequestDelayMs: 5000
+            retryRequestDelayMs: 5000, // Increase retry delay
+            keepAliveIntervalMs: 10000, // Keep connection alive
+            syncFullHistory: false // Speed up connection
         });
 
         // Timeout for QR generation (60 seconds)
@@ -287,21 +289,48 @@ app.delete('/instance/delete/:instanceName', authMiddleware, async (req, res) =>
 
         const session = sessions.get(instanceName);
 
-        if (!session) {
-            return res.status(404).json({ error: 'Instance not found' });
+        if (session) {
+            try {
+                // Try to close socket gracefully
+                if (session.sock) {
+                    // Start absolute timeout for logout to prevent hanging
+                    const logoutPromise = session.sock.logout();
+                    const timeoutPromise = new Promise((_, reject) =>
+                        setTimeout(() => reject(new Error('Logout timed out')), 2000)
+                    );
+
+                    await Promise.race([logoutPromise, timeoutPromise]).catch(err => {
+                        logger.warn(`Logout failed (ignoring): ${err.message}`);
+                    });
+
+                    if (session.sock.ws) {
+                        session.sock.ws.terminate();
+                    }
+                }
+            } catch (err) {
+                logger.warn(`Error closing socket for ${instanceName}: ${err.message}`);
+            }
+            sessions.delete(instanceName);
         }
 
-        // Close socket
-        if (session.sock) {
-            await session.sock.logout();
+        // Always try to clean up auth folder
+        const fs = require('fs');
+        const authPath = `./auth_info_${instanceName}`;
+        if (fs.existsSync(authPath)) {
+            try {
+                fs.rmSync(authPath, { recursive: true, force: true });
+                logger.info(`Deleted auth folder: ${authPath}`);
+            } catch (err) {
+                logger.error(`Failed to delete auth folder: ${err.message}`);
+            }
         }
-        sessions.delete(instanceName);
 
         res.json({ message: 'Instance deleted' });
 
     } catch (error) {
-        logger.error(`Error deleting instance: ${error.message} `);
-        res.status(500).json({ error: error.message });
+        logger.error(`Error deleting instance: ${error.message}`);
+        // Even if error, return success to allow backend to retry/continue
+        res.json({ message: 'Instance deletion attempted', error: error.message });
     }
 });
 
