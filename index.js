@@ -109,7 +109,7 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
             logger: pino({ level: 'info' }),
             // Use standard Windows Desktop UA to avoid 515 Stream Error
             browser: ['Windows', 'Chrome', '126.0.6478.126'],
-            markOnlineOnConnect: false,
+            markOnlineOnConnect: true, // Fix 515 error by signaling presence
             generateHighQualityLinkPreview: true,
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
