@@ -104,8 +104,11 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
 
         const sock = makeWASocket({
             auth: state,
-            printQRInTerminal: true,
+            printQRInTerminal: false,
             logger: pino({ level: 'info' }),
+            browser: ['Ubuntu', 'Chrome', '20.0.04'],
+            markOnlineOnConnect: false,
+            generateHighQualityLinkPreview: true,
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
             retryRequestDelayMs: 5000
