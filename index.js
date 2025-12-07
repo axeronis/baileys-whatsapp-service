@@ -463,9 +463,11 @@ app.post('/message/sendText/:instanceName', authMiddleware, async (req, res) => 
             return res.status(400).json({ error: 'Instance not connected' });
         }
 
-        const jid = number.includes('@') ? number : `${number} @s.whatsapp.net`;
+        const jid = number.includes('@') ? number : `${number}@s.whatsapp.net`;
 
+        logger.info(`Attempting to send message to ${jid} via ${instanceName}`);
         await session.sock.sendMessage(jid, { text });
+        logger.info(`Message successfully sent to ${jid}`);
 
         res.json({ status: 'success', message: 'Message sent' });
 
