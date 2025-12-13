@@ -187,11 +187,17 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
                         const backendUrl = process.env.BACKEND_URL || 'http://backend:8000';
                         const webhookUrl = `${backendUrl}/api/v1/webhook/evolution/${tenantId}`;
 
+                        logger.info(`🔍 DEBUG WEBHOOK: instanceName=${instanceName}, tenantId=${tenantId}`);
+                        logger.info(`🔗 Target URL: ${webhookUrl}`);
                         logger.info(`Forwarding message from ${msg.key.remoteJid} to ${webhookUrl}`);
 
                         // Fire and forget - don't await response to not block Baileys
                         axios.post(webhookUrl, webhookPayload).catch(err => {
                             logger.error(`Failed to forward webhook to backend: ${err.message}`);
+                            if (err.response) {
+                                logger.error(`Status: ${err.response.status}, Data: ${JSON.stringify(err.response.data)}`);
+                            }
+                            logger.error(`Config URL: ${err.config?.url}`);
                         });
 
                     } catch (err) {
