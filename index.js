@@ -124,7 +124,7 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
                 auth: state,
                 printQRInTerminal: false,
                 logger: pino({ level: 'info' }),
-                browser: ['Ubuntu', 'Chrome', '20.0.04'], // Standard Linux/Chrome signature
+                browser: ['MicroFunnel Studio', 'Chrome', '1.0.0'], // Custom signature to reduce bans/disconnects
                 markOnlineOnConnect: true,
                 generateHighQualityLinkPreview: false, // Disable to reduce resource load
                 connectTimeoutMs: 60000,
@@ -240,7 +240,11 @@ app.post('/instance/create', authMiddleware, async (req, res) => {
                     const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
                     if (shouldReconnect) {
-                        logger.info(`Reconnecting ${instanceName} (auto-restart logic)...`);
+                        if (statusCode === 515) {
+                            logger.warn(`Stream Errored (515) for ${instanceName} - Executing auto-restart logic.`);
+                        } else {
+                            logger.info(`Reconnecting ${instanceName} (auto-restart logic)...`);
+                        }
                         // Delay slightly to prevent tight loops
                         setTimeout(() => startSock(), 2000);
                     } else {
